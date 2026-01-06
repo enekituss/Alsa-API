@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Alsa Buscador & Mapa</title>
+    
+    <!-- Librería para descomprimir ZIP -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    
+    <!-- Librería de Mapas (Leaflet) - Gratis y ligera -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <style>
+        :root { --primary: #002786; --accent: #00a1de; --bg: #f8f9fa; --text: #333; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 0; padding-bottom: 80px; }
+        
+        /* Header */
+        header { background: var(--primary); color: white; padding: 1rem; position: sticky; top: 0; z-index: 1000; box-shadow: 0 2px 10px rgba(0,0,0,0.2); }
+        h1 { margin: 0; font-size: 1.2rem; display: flex; align-items: center; gap: 10px; }
+        .status-badge { font-size: 0.7rem; background: rgba(255,255,255,0.2); padding: 2px 8px; border-radius: 10px; }
+
+        /* Loader */
+        #loader-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: white; z-index: 2000; display: flex; flex-direction: column; justify-content: center; align-items: center; transition: opacity 0.5s; }
+        .spinner { width: 50px; height: 50px; border: 5px solid #eee; border-top-color: var(--primary); border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+        #loading-text { margin-top: 20px; color: #666; font-weight: 500; }
+
+        /* Main Layout */
+        .container { max-width: 800px; margin: 0 auto; padding: 15px; }
+
+        /* Search Box */
+        .card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 20px; }
+        .form-group { margin-bottom: 15px; position: relative; }
+        label { display: block; font-size: 0.85rem; font-weight: 600; color: #666; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.5px; }
+        
+        /* Inputs estilizados */
+        input[type="text"], input[type="date"] { width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 1rem; transition: 0.3s; box-sizing: border-box; }
+        input:focus { border-color: var(--primary); outline: none; background: #f0f7ff; }
+        
+        button.btn-search { width: 100%; background: var(--primary); color: white; border: none; padding: 15px; border-radius: 8px; font-size: 1.1rem; font-weight: bold; cursor: pointer; display: flex; justify-content: center; align-items: center; gap: 10px; transition: transform 0.1s; }
+        button.btn-search:active { transform: scale(0.98); }
+
+        /* Results */
+        #results-count { font-weight: bold; margin-bottom: 10px; color: #555; }
+        
+        .trip-card { background: white; border-radius: 10px; overflow: hidden; margin-bottom: 15px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); border-left: 6px solid #ccc; transition: transform 0.2s; }
+        .trip-card:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(0,0,0,0.1); }
+        
+        .trip-main { padding: 15px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+        .trip-info h3 { margin: 0; font-size: 1.1rem; color: var(--primary); }
+        .trip-info p { margin: 5px 0 0; color: #777; font-size: 0.9rem; }
+        .trip-times { text-align: right; }
+        .time-big { font-size: 1.4rem; font-weight: 800; color: #222; }
+        .duration { font-size: 0.8rem; color: #888; background: #eee; padding: 2px 6px; border-radius: 4px; }
+
+        /* Details & Map */
+        .trip-details { display: none; background: #fafafa; border-top: 1px solid #eee; padding: 0; }
+        .stops-timeline { padding: 15px; max-height: 200px; overflow-y: auto; border-bottom: 1px solid #eee; }
+        .timeline-item { display: flex; gap: 10px; padding: 5px 0; font-size: 0.9rem; }
+        .timeline-time { font-weight: bold; color: var(--primary); width: 50px; }
+        .timeline-stop { flex: 1; }
+        .current-segment { color: #000; font-weight: 600; }
+        .other-segment { color: #aaa; }
+
+        /* Mini Map container inside details */
+        .map-container { height: 250px; width: 100%; background: #ddd; }
+
+        /* Mobile specific */
+        @media (max-width: 600px) {
+            .container { padding: 10px; }
+            .time-big { font-size: 1.2rem; }
+        }
+    </style>
+</head>
+<body>
+
+<!-- Pantalla de Carga -->
+<div id="loader-overlay">
+    <div class="spinner"></div>
+    <div id="loading-text">Conectando con la base de datos...</div>
+</div>
+
+<header>
+    <h1>🚌 Buscador ALSA <span class="status-badge" id="db-status">Offline</span></h1>
+</header>
+
+<div class="container">
+    
+    <!-- Formulario de Búsqueda -->
+    <div class="card">
+        <div class="form-group">
+            <label>📅 Fecha de viaje</label>
+            <input type="date" id="date-input">
+        </div>
+
+        <div class="form-group">
+            <label>📍 Origen</label>
+            <!-- Input con datalist para autocompletado -->
+            <input type="text" id="origin-input" list="stops-list" placeholder="Escribe para buscar (Ej: España)..." autocomplete="off">
+        </div>
+
+        <div class="form-group">
+            <label>🏁 Destino</label>
+            <input type="text" id="dest-input" list="stops-list" placeholder="Escribe para buscar..." autocomplete="off">
+        </div>
+
+        <button class="btn-search" onclick="findRoute()">
+            🔍 Buscar Horarios
+        </button>
+
+        <!-- Lista oculta para el autocompletado -->
+        <datalist id="stops-list"></datalist>
+    </div>
+
+    <!-- Resultados -->
+    <div id="results-area"></div>
+</div>
+
+<script>
+    // =======================================================
+    // ⚙️ CONFIGURACIÓN: URL DEL ZIP EN GITHUB
+    // =======================================================
+    const ZIP_URL = "https://raw.githubusercontent.com/enekituss/Alsa-API/main/gtfs.zip"; 
+    // =======================================================
+
+    // Variables globales
+    const DB = { stops: {}, routes: {}, calendar: {}, calendar_dates: {}, trips: {}, stop_times: [] };
+    let tripStopMap = {}; 
+    let mapInstance = null; // Instancia del mapa Leaflet
+    let markersLayer = null; // Capa para limpiar marcadores
+
+    // --- 1. CARGA INICIAL ---
+    window.onload = async function() {
+        try {
+            updateLoader("Descargando horarios (ZIP)...");
+            const response = await fetch(ZIP_URL);
+            if (!response.ok) throw new Error("No se pudo descargar gtfs.zip");
+            
+            const blob = await response.blob();
+            updateLoader("Descomprimiendo archivos...");
+            const zip = await JSZip.loadAsync(blob);
+            
+            const filesToRead = ['stops.txt', 'routes.txt', 'trips.txt', 'calendar.txt', 'calendar_dates.txt', 'stop_times.txt'];
+            
+            for (const filename of filesToRead) {
+                if (zip.file(filename)) {
+                    updateLoader(`Leyendo ${filename}...`);
+                    const text = await zip.file(filename).async("string");
+                    parseFile(filename, text);
+                }
+            }
+
+            updateLoader("Optimizando base de datos...");
+            processData();
+            
+            // Inicializar UI
+            populateStopList();
+            document.getElementById('date-input').valueAsDate = new Date();
+            
+            // Ocultar loader
+            document.getElementById('loader-overlay').style.opacity = '0';
+            setTimeout(() => { document.getElementById('loader-overlay').style.display = 'none'; }, 500);
+            document.getElementById('db-status').textContent = "Online";
+            document.getElementById('db-status').style.background = "#4caf50";
+            document.getElementById('db-status').style.color = "white";
+
+        } catch (err) {
+            document.getElementById('loading-text').innerHTML = `<span style="color:red">Error: ${err.message}</span><br><small>Verifica la URL del ZIP en el código.</small>`;
+        }
+    };
+
+    function updateLoader(text) {
+        document.getElementById('loading-text').textContent = text;
+    }
+
+    // --- 2. PARSEO DE DATOS (CSV) ---
+    function parseCSV(text) {
+        const lines = text.trim().split('\n');
+        // Regex compleja para separar por comas PERO ignorar comas dentro de comillas (Ej: "Madrid, Av. America")
+        const result = [];
+        const headers = lines[0].replace('\r','').split(',');
+
+        for (let i = 1; i < lines.length; i++) {
+            if (!lines[i]) continue;
+            const row = [];
+            let inQuotes = false;
+            let currentStr = '';
+            const line = lines[i].replace('\r','');
+            
+            for (let char of line) {
+                if (char === '"') { inQuotes = !inQuotes; continue; }
+                if (char === ',' && !inQuotes) { row.push(currentStr); currentStr = ''; } 
+                else { currentStr += char; }
+            }
+            row.push(currentStr); // Último campo
+
+            const obj = {};
+            headers.forEach((h, idx) => obj[h] = row[idx] || '');
+            result.push(obj);
+        }
+        return result;
+    }
+
+    function parseFile(filename, text) {
+        const data = parseCSV(text);
+        if (filename === 'stops.txt') {
+            data.forEach(s => DB.stops[s.stop_id] = { name: s.stop_name, lat: parseFloat(s.stop_lat), lon: parseFloat(s.stop_lon) });
+        } else if (filename === 'routes.txt') {
+            data.forEach(r => DB.routes[r.route_id] = { name: r.route_short_name, longName: r.route_long_name, color: r.route_color || '002786' });
+        } else if (filename === 'trips.txt') {
+            data.forEach(t => DB.trips[t.trip_id] = { routeId: t.route_id, serviceId: t.service_id, headsign: t.trip_headsign });
+        } else if (filename === 'calendar.txt') {
+            data.forEach(c => DB.calendar[c.service_id] = c);
+        } else if (filename === 'calendar_dates.txt') {
+            data.forEach(cd => {
+                if(!DB.calendar_dates[cd.service_id]) DB.calendar_dates[cd.service_id] = [];
+                DB.calendar_dates[cd.service_id].push({ date: cd.date, type: cd.exception_type });
+            });
+        } else if (filename === 'stop_times.txt') {
+            // Guardar array ligero
+            DB.stop_times = data.map(st => ({
+                tid: st.trip_id,
+                sid: st.stop_id,
+                arr: st.arrival_time,
+                seq: parseInt(st.stop_sequence)
+            }));
+        }
+    }
+
+    function processData() {
+        // Agrupar stop_times por viaje (trip_id)
+        DB.stop_times.forEach(st => {
+            if (!tripStopMap[st.tid]) tripStopMap[st.tid] = [];
+            tripStopMap[st.tid].push(st);
+        });
+        // Ordenar secuencia de paradas
+        for (let tId in tripStopMap) {
+            tripStopMap[tId].sort((a, b) => a.seq - b.seq);
+        }
+        DB.stop_times = null; // Liberar memoria
+    }
+
+    function populateStopList() {
+        const datalist = document.getElementById('stops-list');
+        // Ordenar alfabéticamente
+        const sorted = Object.entries(DB.stops).sort((a,b) => a[1].name.localeCompare(b[1].name));
+        
+        // Crear opciones para el autocompletado
+        let html = '';
+        sorted.forEach(([id, stop]) => {
+            // Value es el nombre, guardamos el ID como atributo data (aunque datalist estándar usa value para input)
+            // Truco: Ponemos "Nombre - [ID]" para poder extraerlo luego, o buscamos por nombre exacto.
+            html += `<option value="${stop.name}" data-id="${id}"></option>`;
+        });
+        datalist.innerHTML = html;
+    }
+
+    // --- 3. LÓGICA DE BÚSQUEDA ---
+    
+    // Función auxiliar para obtener ID desde el nombre del input
+    function getStopIdByName(name) {
+        if (!name) return null;
+        // Buscar coincidencia exacta
+        const entry = Object.entries(DB.stops).find(([id, stop]) => stop.name === name);
+        return entry ? entry[0] : null;
+    }
+
+    function isServiceActive(serviceId, dateObj) {
+        const yyyy = dateObj.getFullYear();
+        const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
+        const dd = String(dateObj.getDate()).padStart(2, '0');
+        const dateStr = `${yyyy}${mm}${dd}`;
+        
+        // 1. Excepciones (Festivos, cambios)
+        if (DB.calendar_dates[serviceId]) {
+            const exc = DB.calendar_dates[serviceId].find(e => e.date === dateStr);
+            if (exc) return exc.type === '1'; // 1=Opera, 2=No opera
+        }
+        
+        // 2. Calendario normal
+        const cal = DB.calendar[serviceId];
+        if (!cal) return false; // Si no hay calendario y no hay excepción 'add', no opera.
+        if (dateStr < cal.start_date || dateStr > cal.end_date) return false;
+
+        const days = [cal.sunday, cal.monday, cal.tuesday, cal.wednesday, cal.thursday, cal.friday, cal.saturday];
+        return days[dateObj.getDay()] === '1';
+    }
+
+    function findRoute() {
+        const nameOrg = document.getElementById('origin-input').value;
+        const nameDst = document.getElementById('dest-input').value;
+        const dateRaw = document.getElementById('date-input').value;
+
+        const originId = getStopIdByName(nameOrg);
+        const destId = getStopIdByName(nameDst);
+
+        if (!originId || !destId) {
+            alert("Por favor, selecciona paradas válidas de la lista desplegable.");
+            return;
+        }
+        if (!dateRaw) { alert("Selecciona una fecha"); return; }
+
+        const resultsArea = document.getElementById('results-area');
+        resultsArea.innerHTML = '<div style="text-align:center; padding:20px;">Buscando rutas... 🚍</div>';
+        
+        const dateObj = new Date(dateRaw);
+        const validTrips = [];
+
+        // Algoritmo de búsqueda
+        for (let tripId in tripStopMap) {
+            const stops = tripStopMap[tripId];
+            const tripMeta = DB.trips[tripId];
+            
+            // 1. Chequeo rápido: ¿Están las paradas en este viaje?
+            // (Hacemos esto antes que el calendario porque es más rápido en JS)
+            const idxOrg = stops.findIndex(s => s.sid === originId);
+            const idxDst = stops.findIndex(s => s.sid === destId);
+
+            if (idxOrg === -1 || idxDst === -1) continue; // No pasa por ambas
+            if (idxOrg >= idxDst) continue; // Pasa, pero en dirección contraria
+
+            // 2. Chequeo de Calendario (más costoso)
+            if (!tripMeta || !isServiceActive(tripMeta.serviceId, dateObj)) continue;
+
+            // ¡Ruta válida!
+            validTrips.push({
+                tripId: tripId,
+                route: DB.routes[tripMeta.routeId],
+                headsign: tripMeta.headsign,
+                dep: stops[idxOrg].arr, // Hora salida origen
+                arr: stops[idxDst].arr, // Hora llegada destino
+                stops: stops,
+                orgIndex: idxOrg,
+                dstIndex: idxDst
+            });
+        }
+
+        validTrips.sort((a, b) => a.dep.localeCompare(b.dep));
+        renderResults(validTrips, originId, destId);
+    }
+
+    function renderResults(trips, originId, destId) {
+        const area = document.getElementById('results-area');
+        if (trips.length === 0) {
+            area.innerHTML = '<div style="text-align:center; padding:20px; color:#666">No se encontraron servicios directos para esta fecha. Intenta cambiar de día.</div>';
+            return;
+        }
+
+        let html = `<div id="results-count">Se encontraron ${trips.length} opciones:</div>`;
+        
+        trips.forEach((t, i) => {
+            const color = `#${t.route.color}`;
+            const durationMs = parseTime(t.arr) - parseTime(t.dep);
+            const durationMin = Math.round(durationMs / 60000);
+            
+            html += `
+            <div class="trip-card" style="border-left-color: ${color}">
+                <div class="trip-main" onclick="toggleDetails(${i}, '${t.tripId}', ${t.orgIndex}, ${t.dstIndex})">
+                    <div class="trip-info">
+                        <h3>Línea ${t.route.name}</h3>
+                        <p>Hacia: ${t.headsign}</p>
+                    </div>
+                    <div class="trip-times">
+                        <div class="time-big">${t.dep.substring(0,5)}</div>
+                        <div class="duration">${durationMin} min</div>
+                    </div>
+                </div>
+                
+                <div id="detail-${i}" class="trip-details">
+                    <div class="stops-timeline" id="timeline-${i}"></div>
+                    <div id="map-${i}" class="map-container"></div>
+                </div>
+            </div>`;
+        });
+        area.innerHTML = html;
+    }
+
+    function parseTime(timeStr) {
+        // timeStr formato "HH:MM:SS" (puede ser > 24h)
+        const [h, m, s] = timeStr.split(':').map(Number);
+        return (h * 3600 + m * 60 + s) * 1000;
+    }
+
+    // --- 4. MAPA Y DETALLES ---
+    
+    function toggleDetails(index, tripId, idxOrg, idxDst) {
+        const detailDiv = document.getElementById(`detail-${index}`);
+        const timelineDiv = document.getElementById(`timeline-${index}`);
+        const mapDivId = `map-${index}`;
+        
+        // Cerrar si ya está abierto
+        if (detailDiv.style.display === 'block') {
+            detailDiv.style.display = 'none';
+            return;
+        }
+
+        // Cerrar otros abiertos (opcional, para limpieza)
+        document.querySelectorAll('.trip-details').forEach(d => d.style.display = 'none');
+        detailDiv.style.display = 'block';
+
+        // 1. Renderizar Timeline (lista de paradas)
+        const stops = tripStopMap[tripId];
+        let tlHtml = '';
+        const coordsForMap = [];
+
+        stops.forEach((s, i) => {
+            const stopInfo = DB.stops[s.sid];
+            const isRelevant = i >= idxOrg && i <= idxDst;
+            const styleClass = isRelevant ? 'current-segment' : 'other-segment';
+            const icon = isRelevant ? '🟢' : '⚪';
+            if (i === idxOrg) icon = '🏁'; // Bandera salida
+            if (i === idxDst) icon = '🏁'; // Bandera llegada
+
+            tlHtml += `
+            <div class="timeline-item ${styleClass}">
+                <div class="timeline-time">${s.arr.substring(0,5)}</div>
+                <div class="timeline-stop">${icon} ${stopInfo.name}</div>
+            </div>`;
+
+            // Guardar coords para el mapa
+            if (isRelevant) {
+                coordsForMap.push([stopInfo.lat, stopInfo.lon]);
+            }
+        });
+        timelineDiv.innerHTML = tlHtml;
+
+        // 2. Renderizar Mapa
+        // Pequeño delay para que el div sea visible antes de pintar el mapa
+        setTimeout(() => {
+            initMap(mapDivId, coordsForMap);
+        }, 100);
+    }
+
+    function initMap(divId, coords) {
+        // Si ya hay un mapa instanciado en algún lado, eliminarlo (Leaflet no deja reusar container)
+        // Ojo: Aquí creamos un mapa por tarjeta. Lo ideal es destruir el anterior si existe.
+        const container = document.getElementById(divId);
+        if (container._leaflet_id) {
+             container._leaflet_id = null; // Hack rápido para reiniciar contenedor
+        }
+        
+        // Crear mapa
+        const map = L.map(divId);
+        
+        // Capa base (OpenStreetMap)
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap'
+        }).addTo(map);
+
+        if (coords.length > 0) {
+            // Dibujar línea (Polyline)
+            const polyline = L.polyline(coords, {color: 'blue', weight: 5}).addTo(map);
+            
+            // Añadir marcadores inicio y fin
+            L.circleMarker(coords[0], {color: 'green', radius: 8}).addTo(map).bindPopup("Origen");
+            L.circleMarker(coords[coords.length-1], {color: 'red', radius: 8}).addTo(map).bindPopup("Destino");
+
+            // Centrar mapa
+            map.fitBounds(polyline.getBounds(), {padding: [20, 20]});
+        }
+    }
+
+</script>
+
+</body>
+</html>
